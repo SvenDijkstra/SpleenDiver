@@ -3,7 +3,9 @@
 import numpy as np
 import cv2
 import mss
+import time
 from config_manager import load_config
+from game_controller import pause_game, unpause_game
 
 
 def capture_game_window():
@@ -112,15 +114,6 @@ def is_game_paused(img, play_area=None, debug=False):
     # If we have the play area, focus on that region
     if play_area:
         x, y, w, h = play_area
-        # Ensure coordinates are within bounds
-        h, w, _ = img.shape
-        x = max(0, x)
-        y = max(0, y)
-        w = min(w - x, play_area[2])
-        h = min(h - y, play_area[3])
-
-        if w <= 0 or h <= 0:
-            return False  # Invalid play area
         region = img[y:y + h, x:x + w]
     else:
         region = img
@@ -129,34 +122,94 @@ def is_game_paused(img, play_area=None, debug=False):
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
 
     # The "Paused" text is white on black background
-    # Threshold to find white text (high values). Keeping 200 as it produced a good debug image.
+    # Threshold to find white text (high values)
     _, white_text = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
     if debug:
-        # Save a *different* name if you want to compare the original vs. the thresholded
-        cv2.imwrite("debug_6_pause_detection_thresholded.png", white_text)
-        # Note: The original file name "debug_6_pause_detection.png" was used for the input image
+        cv2.imwrite("debug_6_pause_detection.png", white_text)
 
     # Count white pixels - if there's significant white text, game is likely paused
     white_pixel_count = np.sum(white_text == 255)
     total_pixels = white_text.size
-
-    if total_pixels == 0:
-        return False
-
     white_percentage = (white_pixel_count / total_pixels) * 100
 
-    if debug:
-        print(f"White pixel count: {white_pixel_count}")
-        print(f"Total pixels in region: {total_pixels}")
-        print(f"White pixel percentage: {white_percentage:.2f}%")
+    print(f"White pixel percentage: {white_percentage:.2f}%")
 
-    # --- EDITED DETECTION LOGIC ---
-    # 1. Check for a minimum count of white pixels to ensure actual text is present (e.g., > 1000)
-    # 2. Check for a reasonable percentage of white pixels (lowered from 5.0 to 0.5 for robustness)
-    is_paused = white_pixel_count > 1000 and white_percentage > 0.5
+    # If more than ~5% of the play area is white, it's probably paused
+    # (The "Paused" text and button take up significant space)
+    is_paused = white_percentage > 5.0
 
     return is_paused
+
+
+def detect_grid_with_auto_pause(img, max_attempts=3):
+    """
+    Attempts to detect the grid size, automatically pausing the game if needed.
+
+    Args:
+        img: The initial captured game window image
+        max_attempts: Maximum number of attempts to detect the grid
+
+    Returns:
+        tuple: (grid_info dict, play_area tuple, was_paused_initially bool)
+               Returns (None, None, False) if detection fails
+    """
+    # First attempt - check current state
+    play_area = find_play_area(img, debug=False)
+
+    if play_area:
+        x, y, w, h = play_area
+        grid_info = detect_grid_size((w, h))
+
+        if grid_info:
+            # Successfully detected without intervention
+            was_paused = is_game_paused(img, play_area, debug=False)
+            return grid_info, play_area, was_paused
+
+    # Grid not detected - game is probably not paused
+    print("Grid not detected in current state. Attempting to pause game...")
+
+    # Check if already paused
+    was_initially_paused = False
+    if play_area:
+        was_initially_paused = is_game_paused(img, play_area, debug=False)
+
+    if was_initially_paused:
+        print("Game is already paused but grid not detected. Checking again...")
+        return None, None, was_initially_paused
+
+    # Try pausing and detecting
+    for attempt in range(max_attempts):
+        print(f"Attempt {attempt + 1}/{max_attempts}...")
+
+        # Pause the game
+        pause_game()
+
+        # Capture new screenshot
+        img = capture_game_window()
+        if img is None:
+            continue
+
+        # Try to find play area
+        play_area = find_play_area(img, debug=False)
+        if not play_area:
+            continue
+
+        # Check if actually paused
+        x, y, w, h = play_area
+        if not is_game_paused(img, play_area, debug=False):
+            print("Game did not pause properly, retrying...")
+            continue
+
+        # Try to detect grid
+        grid_info = detect_grid_size((w, h))
+
+        if grid_info:
+            print("✓ Grid detected successfully after pausing!")
+            return grid_info, play_area, False  # Was not initially paused
+
+    print("✗ Failed to detect grid after multiple attempts")
+    return None, None, False
 
 
 def detect_grid_size(play_area_dimensions):
