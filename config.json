@@ -1,0 +1,10 @@
+{
+    "target_process_name": "dota2.exe",
+    "play_region_coords": [
+        534,
+        243,
+        1495,
+        1012
+    ],
+    "auto_solve_enabled": false
+}
