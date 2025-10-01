@@ -60,7 +60,7 @@ def find_play_area(img, debug=False):
     # The play area is very dark (black), while the border is grey
     # Let's threshold to find the dark play area
     # Values below 10 are the black play area
-    _, binary = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
+    _, binary = cv2.threshold(gray, 7, 255, cv2.THRESH_BINARY_INV)
 
     if debug:
         cv2.imwrite("debug_3_threshold.png", binary)
@@ -98,7 +98,8 @@ def find_play_area(img, debug=False):
 
 def is_game_paused(img, play_area=None, debug=False):
     """
-    Detects if the game is paused by looking for the "Paused" text.
+    Detects if the game is paused by looking for the "Paused" text
+    and a predominantly black screen.
 
     Args:
         img: The captured game window image
@@ -114,30 +115,59 @@ def is_game_paused(img, play_area=None, debug=False):
     # If we have the play area, focus on that region
     if play_area:
         x, y, w, h = play_area
+        # Ensure coordinates are within bounds
+        h_img, w_img, _ = img.shape
+        x = max(0, x)
+        y = max(0, y)
+        w = min(w_img - x, w)
+        h = min(h_img - y, h)
+        if w <= 0 or h <= 0:
+            return False
         region = img[y:y + h, x:x + w]
     else:
         region = img
 
     # Convert to grayscale
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    total_pixels = gray.size
 
-    # The "Paused" text is white on black background
-    # Threshold to find white text (high values)
-    _, white_text = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    if total_pixels == 0:
+        return False
 
-    if debug:
-        cv2.imwrite("debug_6_pause_detection.png", white_text)
+    # --- 1. Check for a Predominantly Black Background ---
+    # Black is a value close to 0 in grayscale. Use a low threshold (e.g., 20)
+    # The image is pitch black, so we expect a high percentage of pixels to be near 0.
+    _, black_mask = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY_INV)
+    black_pixel_count = np.sum(black_mask == 255)
+    black_percentage = (black_pixel_count / total_pixels) * 100
 
-    # Count white pixels - if there's significant white text, game is likely paused
-    white_pixel_count = np.sum(white_text == 255)
-    total_pixels = white_text.size
+    # If the screen is less than 90% black, it's probably not the pause screen.
+    is_black_screen = black_percentage > 90.0
+
+    # --- 2. Detect White Text ("Paused") ---
+    # Threshold to find white text (high values, 200 is good based on your image)
+    _, white_text_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+    white_pixel_count = np.sum(white_text_mask == 255)
     white_percentage = (white_pixel_count / total_pixels) * 100
 
-    print(f"White pixel percentage: {white_percentage:.2f}%")
+    if debug:
+        print(f"Black pixel percentage (<= 20): {black_percentage:.2f}% (Required > 90.0%)")
+        print(f"White pixel count (>= 200): {white_pixel_count}")
+        print(f"White pixel percentage: {white_percentage:.2f}% (Required > 0.1%)")
+        cv2.imwrite("debug_6_pause_white_mask.png", white_text_mask)
 
-    # If more than ~5% of the play area is white, it's probably paused
-    # (The "Paused" text and button take up significant space)
-    is_paused = white_percentage > 5.0
+    # --- 3. Combined Logic for Pause Detection ---
+    # The game is paused if:
+    # A) The screen is mostly black (e.g., > 90% black).
+    # AND
+    # B) A minimum number of white pixels (e.g., > 1000) are present (to account for the 'Paused' text)
+    #    AND the white text is a small but meaningful percentage (e.g., > 0.1%)
+
+    is_paused = (
+            is_black_screen and
+            white_pixel_count > 1000 and  # Ensures actual text is present (adjust based on image size)
+            white_percentage > 0.1  # Low percentage for large screens
+    )
 
     return is_paused
 
@@ -280,6 +310,13 @@ def detect_grid_size(play_area_dimensions):
 
 # Test and analysis
 if __name__ == "__main__":
+    print("=== Focusing game window ===")
+    if not focus_game_window():
+        print("⚠ Warning: Could not focus game window")
+        print("The script will continue, but key presses may not work\n")
+    else:
+        print("✓ Game window focused\n")
+
     print("=== Capturing game window ===")
     img = capture_game_window()
 
@@ -289,37 +326,26 @@ if __name__ == "__main__":
 
     print(f"✓ Capture successful! Image shape: {img.shape}\n")
 
-    print("=== Finding play area ===")
-    play_area = find_play_area(img, debug=True)
+    print("=== Auto-detecting grid with pause if needed ===")
+    grid_info, play_area, was_paused = detect_grid_with_auto_pause(img)
 
-    if play_area:
+    if grid_info and play_area:
         x, y, w, h = play_area
-        print(f"✓ Play area detected: {w}x{h} pixels\n")
+        print(f"\n✓ Detection successful!")
+        print(f"  Stage: {grid_info['stage']}")
+        print(f"  Grid: {grid_info['cols']}x{grid_info['rows']}")
+        print(f"  Bombs: {grid_info['bombs']}")
+        print(f"  Play area: x={x}, y={y}, w={w}, h={h}")
+        print(f"  Was initially paused: {was_paused}")
 
-        print("=== Detecting grid size ===")
-        grid_info = detect_grid_size((w, h))
-        if grid_info:
-            print(f"✓ Detected: Stage {grid_info['stage']}")
-            print(f"  Grid: {grid_info['cols']}x{grid_info['rows']}")
-            print(f"  Bombs: {grid_info['bombs']}\n")
-        else:
-            print("✗ Could not determine grid size\n")
-
-        print("=== Checking if game is paused ===")
-        paused = is_game_paused(img, play_area, debug=True)
-        print(f"Game paused: {paused}")
+        # If we paused the game, ask if user wants to unpause
+        if not was_paused:
+            user_input = input("\nGame was paused for detection. Unpause now? (y/n): ")
+            if user_input.lower() == 'y':
+                unpause_game()
+                print("Game unpaused!")
     else:
-        print("✗ Play area not found!")
+        print("\n✗ Grid detection failed!")
 
     print("\n" + "=" * 50)
-    print("Check the debug images:")
-    print("  1. debug_1_original.png - Your capture")
-    print("  2. debug_2_grayscale.png - Grayscale version")
-    print("  3. debug_3_threshold.png - Black area detection")
-    print("  4. debug_4_detected_area.png - Detected play area (green box)")
-    print("  5. debug_5_play_area_only.png - Extracted play area")
-    print("  6. debug_6_pause_detection.png - Pause detection")
-    print("\n" + "=" * 50)
-    print("NEXT STEP: Please tell me the 5 possible grid sizes")
-    print("Example: 5x5, 6x6, 7x7, 8x8, 9x9")
-    print("Or: 4x5, 5x6, 6x7, etc.")
+    print("Grid detection with auto-pause complete!")

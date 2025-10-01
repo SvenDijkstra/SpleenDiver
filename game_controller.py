@@ -21,10 +21,14 @@ def focus_game_window():
         # Get all windows
         windows = gw.getAllTitles()
 
+        # Debug: print all windows
+        print(f"Searching for window containing '{game_name}'...")
+
         # Find window that contains the game name (case-insensitive)
         game_window = None
         for window_title in windows:
             if game_name.lower() in window_title.lower() or 'dota' in window_title.lower():
+                print(f"Found matching window: {window_title}")
                 game_window = gw.getWindowsWithTitle(window_title)[0]
                 break
 
@@ -35,6 +39,10 @@ def focus_game_window():
             return True
         else:
             print(f"Could not find game window containing '{game_name}'")
+            print("Available windows:")
+            for title in windows:
+                if title.strip():  # Only show non-empty titles
+                    print(f"  - {title}")
             return False
 
     except Exception as e:
@@ -112,10 +120,18 @@ def use_skill_d():
 # Test function
 if __name__ == "__main__":
     print("Testing game controller functions...")
-    print("Make sure the game window is focused!")
+    print("Starting test in 2 seconds...")
     time.sleep(2)
 
-    print("\nTesting pause/unpause...")
+    print("\n=== Testing window focus ===")
+    if focus_game_window():
+        print("✓ Game window focused successfully!")
+    else:
+        print("✗ Could not focus game window")
+
+    time.sleep(1)
+
+    print("\n=== Testing pause/unpause ===")
     pause_game()
     time.sleep(1)
     unpause_game()
