@@ -5,7 +5,7 @@ import cv2
 import mss
 import time
 from config_manager import load_config
-from game_controller import pause_game, unpause_game
+from game_controller import pause_game, unpause_game, focus_game_window
 
 
 def capture_game_window():
@@ -98,8 +98,7 @@ def find_play_area(img, debug=False):
 
 def is_game_paused(img, play_area=None, debug=False):
     """
-    Detects if the game is paused by looking for the "Paused" text
-    and a predominantly black screen.
+    Detects if the game is paused by looking for the "Paused" text.
 
     Args:
         img: The captured game window image
@@ -115,59 +114,30 @@ def is_game_paused(img, play_area=None, debug=False):
     # If we have the play area, focus on that region
     if play_area:
         x, y, w, h = play_area
-        # Ensure coordinates are within bounds
-        h_img, w_img, _ = img.shape
-        x = max(0, x)
-        y = max(0, y)
-        w = min(w_img - x, w)
-        h = min(h_img - y, h)
-        if w <= 0 or h <= 0:
-            return False
         region = img[y:y + h, x:x + w]
     else:
         region = img
 
     # Convert to grayscale
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    total_pixels = gray.size
 
-    if total_pixels == 0:
-        return False
-
-    # --- 1. Check for a Predominantly Black Background ---
-    # Black is a value close to 0 in grayscale. Use a low threshold (e.g., 20)
-    # The image is pitch black, so we expect a high percentage of pixels to be near 0.
-    _, black_mask = cv2.threshold(gray, 20, 255, cv2.THRESH_BINARY_INV)
-    black_pixel_count = np.sum(black_mask == 255)
-    black_percentage = (black_pixel_count / total_pixels) * 100
-
-    # If the screen is less than 90% black, it's probably not the pause screen.
-    is_black_screen = black_percentage > 90.0
-
-    # --- 2. Detect White Text ("Paused") ---
-    # Threshold to find white text (high values, 200 is good based on your image)
-    _, white_text_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-    white_pixel_count = np.sum(white_text_mask == 255)
-    white_percentage = (white_pixel_count / total_pixels) * 100
+    # The "Paused" text is white on black background
+    # Threshold to find white text (high values)
+    _, white_text = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
 
     if debug:
-        print(f"Black pixel percentage (<= 20): {black_percentage:.2f}% (Required > 90.0%)")
-        print(f"White pixel count (>= 200): {white_pixel_count}")
-        print(f"White pixel percentage: {white_percentage:.2f}% (Required > 0.1%)")
-        cv2.imwrite("debug_6_pause_white_mask.png", white_text_mask)
+        cv2.imwrite("debug_6_pause_detection.png", white_text)
 
-    # --- 3. Combined Logic for Pause Detection ---
-    # The game is paused if:
-    # A) The screen is mostly black (e.g., > 90% black).
-    # AND
-    # B) A minimum number of white pixels (e.g., > 1000) are present (to account for the 'Paused' text)
-    #    AND the white text is a small but meaningful percentage (e.g., > 0.1%)
+    # Count white pixels - if there's significant white text, game is likely paused
+    white_pixel_count = np.sum(white_text == 255)
+    total_pixels = white_text.size
+    white_percentage = (white_pixel_count / total_pixels) * 100
 
-    is_paused = (
-            is_black_screen and
-            white_pixel_count > 1000 and  # Ensures actual text is present (adjust based on image size)
-            white_percentage > 0.1  # Low percentage for large screens
-    )
+    print(f"White pixel percentage: {white_percentage:.2f}%")
+
+    # If more than ~5% of the play area is white, it's probably paused
+    # (The "Paused" text and button take up significant space)
+    is_paused = white_percentage > 5.0
 
     return is_paused
 
