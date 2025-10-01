@@ -32,3 +32,22 @@ def get_all_processes():
             # Some processes may not be accessible, so we skip them
             pass
     return sorted(process_list, key=lambda x: x.lower())
+
+def activate_game_window(x_coord=960, y_coord=540, sleep_time=0.1):
+    """
+    Activates the game window by simulating a mouse click at a specified
+    coordinate (default is the center of a 1920x1080 screen).
+    This ensures the game is focused and ready to receive key inputs.
+
+    Args:
+        x_coord (int): X-coordinate for the click.
+        y_coord (int): Y-coordinate for the click.
+        sleep_time (float): Time to wait after the click to allow the OS to switch focus.
+    """
+    print(f"Activating game window by clicking at ({x_coord}, {y_coord})...")
+    # Move the mouse to the coordinate and click
+    pyautogui.click(x=x_coord, y=y_coord)
+    # Wait briefly for the OS to register the focus change
+    time.sleep(sleep_time)
+
+# --- The is_game_paused function, kept exactly as requested ---

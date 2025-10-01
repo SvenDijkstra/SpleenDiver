@@ -60,7 +60,7 @@ def find_play_area(img, debug=False):
     # The play area is very dark (black), while the border is grey
     # Let's threshold to find the dark play area
     # Values below 10 are the black play area
-    _, binary = cv2.threshold(gray, 7, 255, cv2.THRESH_BINARY_INV)
+    _, binary = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY_INV)
 
     if debug:
         cv2.imwrite("debug_3_threshold.png", binary)
