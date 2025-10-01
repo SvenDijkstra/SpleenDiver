@@ -1,0 +1,272 @@
+# vision_detector.py
+
+import numpy as np
+import cv2
+import mss
+from config_manager import load_config
+
+
+def capture_game_window():
+    """
+    Captures a screenshot of the entire game window area.
+    Returns: numpy array (BGR format) or None if capture fails
+    """
+    config = load_config()
+    coords = config.get('play_region_coords', [0, 0, 800, 600])
+
+    # coords format: [x, y, width, height]
+    monitor = {
+        "left": coords[0],
+        "top": coords[1],
+        "width": coords[2],
+        "height": coords[3]
+    }
+
+    try:
+        with mss.mss() as sct:
+            screenshot = sct.grab(monitor)
+            img = np.array(screenshot)
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return img
+    except Exception as e:
+        print(f"Error capturing game window: {e}")
+        return None
+
+
+def find_play_area(img, debug=False):
+    """
+    Finds the actual play area (grid) within the game window.
+    The play area is the black rectangle with rounded corners inside the grey border.
+
+    Args:
+        img: The captured game window image
+        debug: If True, saves debug images showing detection steps
+
+    Returns:
+        (x, y, width, height) of the play area, or None if not found
+    """
+    if img is None:
+        return None
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    if debug:
+        cv2.imwrite("debug_1_original.png", img)
+        cv2.imwrite("debug_2_grayscale.png", gray)
+
+    # The play area is very dark (black), while the border is grey
+    # Let's threshold to find the dark play area
+    # Values below 10 are the black play area
+    _, binary = cv2.threshold(gray, 7, 255, cv2.THRESH_BINARY_INV)
+
+    if debug:
+        cv2.imwrite("debug_3_threshold.png", binary)
+
+    # Find contours in the binary image
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    if not contours:
+        print("No contours found!")
+        return None
+
+    # Find the largest contour (should be the play area)
+    largest_contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest_contour)
+
+    print(f"Largest contour area: {area} pixels")
+
+    # Get bounding rectangle
+    x, y, w, h = cv2.boundingRect(largest_contour)
+
+    print(f"Play area found at: x={x}, y={y}, width={w}, height={h}")
+
+    if debug:
+        # Draw the detected play area on the original image
+        debug_img = img.copy()
+        cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 3)
+        cv2.imwrite("debug_4_detected_area.png", debug_img)
+
+        # Also save just the extracted play area
+        play_area_img = img[y:y + h, x:x + w]
+        cv2.imwrite("debug_5_play_area_only.png", play_area_img)
+
+    return (x, y, w, h)
+
+
+def is_game_paused(img, play_area=None, debug=False):
+    """
+    Detects if the game is paused by looking for the "Paused" text.
+
+    Args:
+        img: The captured game window image
+        play_area: Optional (x, y, w, h) tuple of the play area
+        debug: If True, saves debug images
+
+    Returns:
+        bool: True if game is paused, False otherwise
+    """
+    if img is None:
+        return False
+
+    # If we have the play area, focus on that region
+    if play_area:
+        x, y, w, h = play_area
+        # Ensure coordinates are within bounds
+        h, w, _ = img.shape
+        x = max(0, x)
+        y = max(0, y)
+        w = min(w - x, play_area[2])
+        h = min(h - y, play_area[3])
+
+        if w <= 0 or h <= 0:
+            return False  # Invalid play area
+        region = img[y:y + h, x:x + w]
+    else:
+        region = img
+
+    # Convert to grayscale
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+    # The "Paused" text is white on black background
+    # Threshold to find white text (high values). Keeping 200 as it produced a good debug image.
+    _, white_text = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+
+    if debug:
+        # Save a *different* name if you want to compare the original vs. the thresholded
+        cv2.imwrite("debug_6_pause_detection_thresholded.png", white_text)
+        # Note: The original file name "debug_6_pause_detection.png" was used for the input image
+
+    # Count white pixels - if there's significant white text, game is likely paused
+    white_pixel_count = np.sum(white_text == 255)
+    total_pixels = white_text.size
+
+    if total_pixels == 0:
+        return False
+
+    white_percentage = (white_pixel_count / total_pixels) * 100
+
+    if debug:
+        print(f"White pixel count: {white_pixel_count}")
+        print(f"Total pixels in region: {total_pixels}")
+        print(f"White pixel percentage: {white_percentage:.2f}%")
+
+    # --- EDITED DETECTION LOGIC ---
+    # 1. Check for a minimum count of white pixels to ensure actual text is present (e.g., > 1000)
+    # 2. Check for a reasonable percentage of white pixels (lowered from 5.0 to 0.5 for robustness)
+    is_paused = white_pixel_count > 1000 and white_percentage > 0.5
+
+    return is_paused
+
+
+def detect_grid_size(play_area_dimensions):
+    """
+    Determines the grid size based on the play area dimensions.
+    The game has 5 stages with different grid sizes:
+    - Stage 1: 9x9 (10 bombs)
+    - Stage 2: 12x11 (19 bombs)
+    - Stage 3: 15x13 (32 bombs)
+    - Stage 4: 18x14 (47 bombs)
+    - Stage 5: 20x16 (66 bombs)
+
+    Each tile is approximately 48x48 pixels.
+
+    Args:
+        play_area_dimensions: (width, height) tuple of the play area in pixels
+
+    Returns:
+        dict with 'cols', 'rows', 'stage', 'bombs' or None if unknown
+    """
+    if not play_area_dimensions:
+        return None
+
+    width, height = play_area_dimensions
+
+    print(f"Play area dimensions: {width}x{height} pixels")
+
+    # Known grid configurations (cols, rows, stage, bombs)
+    KNOWN_GRIDS = [
+        {'cols': 9, 'rows': 9, 'stage': 1, 'bombs': 10},
+        {'cols': 12, 'rows': 11, 'stage': 2, 'bombs': 19},
+        {'cols': 15, 'rows': 13, 'stage': 3, 'bombs': 32},
+        {'cols': 18, 'rows': 14, 'stage': 4, 'bombs': 47},
+        {'cols': 20, 'rows': 16, 'stage': 5, 'bombs': 66},
+    ]
+
+    # Approximate tile size
+    TILE_SIZE = 48
+
+    # Calculate how many tiles fit in the play area
+    estimated_cols = round(width / TILE_SIZE)
+    estimated_rows = round(height / TILE_SIZE)
+
+    print(f"Estimated grid from dimensions: {estimated_cols}x{estimated_rows}")
+
+    # Find the closest matching grid
+    best_match = None
+    min_difference = float('inf')
+
+    for grid in KNOWN_GRIDS:
+        # Calculate difference from estimated size
+        col_diff = abs(grid['cols'] - estimated_cols)
+        row_diff = abs(grid['rows'] - estimated_rows)
+        total_diff = col_diff + row_diff
+
+        if total_diff < min_difference:
+            min_difference = total_diff
+            best_match = grid
+
+    if best_match and min_difference <= 2:  # Allow small variance
+        print(
+            f"✓ Matched to Stage {best_match['stage']}: {best_match['cols']}x{best_match['rows']} grid ({best_match['bombs']} bombs)")
+        return best_match
+    else:
+        print(f"✗ Could not confidently match grid size (difference: {min_difference})")
+        return None
+
+
+# Test and analysis
+if __name__ == "__main__":
+    print("=== Capturing game window ===")
+    img = capture_game_window()
+
+    if img is None:
+        print("✗ Capture failed!")
+        exit(1)
+
+    print(f"✓ Capture successful! Image shape: {img.shape}\n")
+
+    print("=== Finding play area ===")
+    play_area = find_play_area(img, debug=True)
+
+    if play_area:
+        x, y, w, h = play_area
+        print(f"✓ Play area detected: {w}x{h} pixels\n")
+
+        print("=== Detecting grid size ===")
+        grid_info = detect_grid_size((w, h))
+        if grid_info:
+            print(f"✓ Detected: Stage {grid_info['stage']}")
+            print(f"  Grid: {grid_info['cols']}x{grid_info['rows']}")
+            print(f"  Bombs: {grid_info['bombs']}\n")
+        else:
+            print("✗ Could not determine grid size\n")
+
+        print("=== Checking if game is paused ===")
+        paused = is_game_paused(img, play_area, debug=True)
+        print(f"Game paused: {paused}")
+    else:
+        print("✗ Play area not found!")
+
+    print("\n" + "=" * 50)
+    print("Check the debug images:")
+    print("  1. debug_1_original.png - Your capture")
+    print("  2. debug_2_grayscale.png - Grayscale version")
+    print("  3. debug_3_threshold.png - Black area detection")
+    print("  4. debug_4_detected_area.png - Detected play area (green box)")
+    print("  5. debug_5_play_area_only.png - Extracted play area")
+    print("  6. debug_6_pause_detection.png - Pause detection")
+    print("\n" + "=" * 50)
+    print("NEXT STEP: Please tell me the 5 possible grid sizes")
+    print("Example: 5x5, 6x6, 7x7, 8x8, 9x9")
+    print("Or: 4x5, 5x6, 6x7, etc.")
